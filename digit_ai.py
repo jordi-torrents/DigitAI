@@ -1,3 +1,4 @@
+from collections import deque
 from random import randint
 
 import matplotlib.pyplot as plt
@@ -7,7 +8,6 @@ import torch
 from scipy.ndimage import gaussian_filter1d
 from torch import Tensor, nn, optim
 from torch.backends import cudnn
-from torch.types import Number
 from tqdm import trange
 
 from digit_game import Game, compute_absolute_score
@@ -22,48 +22,35 @@ class ScorePredictor(nn.Module):
         self.n_numbers = n_numbers
 
         self.layers = nn.Sequential(
-            nn.Linear(n_numbers * (board_size * board_size + 1), 256),
+            nn.Linear(9 * (board_size * board_size + 1), 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
             nn.Linear(128, 1),
-            # nn.Sigmoid(),
+            nn.Sigmoid(),
         )
 
     def forward(self, game: Tensor) -> Tensor:
         return self.layers(
-            nn.functional.one_hot(game.long(), num_classes=self.n_numbers)
+            nn.functional.one_hot(game.long(), num_classes=self.n_numbers)[:, :, 1:]
             .float()
             .flatten(1)
         )
 
 
 class LossManager:
-    loss_history: list[float]
-    losses_per_step: list[list[Number]]
-    # weights: Tensor
+    def __init__(self, memory: int = 1000) -> None:
+        self.loss_history: deque[np.ndarray] = deque(maxlen=memory)
 
-    def __init__(self):
-        self.loss_history = []
-        self.losses_per_step = [[] for _ in range(25)]
-        self.weights = torch.ones(24, device="cuda")
-        # self.weights = np.ones(24)
+    def losses_trend(self) -> Tensor:
+        trend: np.ndarray = np.asarray(self.loss_history).mean(0)
+        normalization = trend.mean() / trend
+        return torch.tensor(normalization, device=DEVICE)
 
-    def last_losses_np(self, n: int = 500):
-        return np.asarray(self.loss_history[-n:])
-
-    def add_losses(self, losses: list[Tensor], backward=True):
-        assert losses
-        losses_items = [loss.item() for loss in losses]
-        for losses_per_step, loss in zip(self.losses_per_step, losses_items):
-            losses_per_step.append(loss)
-        current_loss: Tensor = sum(losses)  # type: ignore
-        # current_loss =torch.dot(torch.stack(losses).squeeze(), self.weights)
-        self.loss_history.append(current_loss.item())
-        if backward:
-            current_loss.backward()
+    def add_losses(self, losses: np.ndarray) -> None:
+        self.loss_history.append(losses)
 
 
 class Agent:
@@ -76,10 +63,10 @@ class Agent:
         self.score_predictor = score_predictor
         self.optimizer = optim.Adam(
             self.score_predictor.parameters(),
-            lr=0.0002,
+            lr=0.0005,
         )
         self.schedule = optim.lr_scheduler.MultiStepLR(
-            self.optimizer, [30000, 4000, 5000, 6000, 7000, 8000, 9000], 0.3
+            self.optimizer, [3000, 4000, 5000, 6000, 7000, 8000, 9000], 0.3
         )
         self.predicted_scores: list[Tensor] = []
 
@@ -177,12 +164,13 @@ class Agent:
             scores.append(final_score)
 
             batch_losses = (torch.stack(self.predicted_scores) - final_score).square()
-            # self.loss_manager.add_losses(batch_losses)
 
             if learn:
                 self.optimizer.zero_grad()
-                batch_losses.sum().backward()
+                batch_losses.mean().backward()
                 self.optimizer.step()
+                # loss_normalization = losses.mean(0).detach()
+                # loss_normalization = loss_normalization.mean() / loss_normalization
 
             if game_number % 300 == 0:
                 plot_results(scores, all_losses)
@@ -190,7 +178,7 @@ class Agent:
         plot_results(scores, all_losses)
 
 
-def plot_results(scores, losses) -> None:
+def plot_results(scores: list, losses: list) -> None:
     fig = plt.figure(figsize=(6, 4))
     ax0 = fig.add_subplot(2, 1, 1)
     ax1 = fig.add_subplot(2, 1, 2)
@@ -219,7 +207,7 @@ game = Game()
 score_predictor = ScorePredictor().to(DEVICE)
 agent = Agent(game, score_predictor)
 
-agent.play(n_games=10000, learn=True)
+agent.play(n_games=100000, learn=True)
 # agent.play(n_games=1000, learn=False, output_file="scores_test.dat")
 
 torch.save(score_predictor.state_dict(), "model.pth")
