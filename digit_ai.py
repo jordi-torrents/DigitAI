@@ -92,7 +92,9 @@ class Agent:
         batch = board[None, ...].repeat(len(possible_moves), 0)
 
         # populate boards with possible moves -> shape (N,5,5)
-        batch[range(len(possible_moves)), *possible_moves.T] = current_number
+        batch[
+            range(len(possible_moves)), possible_moves[:, 0], possible_moves[:, 1]
+        ] = current_number
 
         # add the next number information to each board -> shape (N,26)
         batch = np.concatenate(
