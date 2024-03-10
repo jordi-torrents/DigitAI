@@ -1,152 +1,17 @@
-from itertools import pairwise, permutations
 from random import randint
-from typing import Iterator
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import numpy as np
 import torch
-from matplotlib.axes import Axes
 from scipy.ndimage import gaussian_filter1d
-from torch import Tensor, nn, optim, tensor
+from torch import Tensor, nn, optim
 from torch.types import Number
 from tqdm import trange
 
+from digit_game import Game, compute_absolute_score
+
 DEVICE = "cuda"
-
-
-def matches_in_board(board: np.ndarray) -> Iterator[tuple[int, int, int, int, int]]:
-    for col_i, col_j in pairwise(range(5)):
-        if board[0, col_i] == board[0, col_j]:
-            yield col_i, col_j, 0, 0, board[0, col_i]
-        if board[col_i, 0] == board[col_j, 0]:
-            yield 0, 0, col_i, col_j, board[col_i, 0]
-
-    for row in range(1, 5):
-        for col_i, col_j in pairwise(range(5)):
-            if board[row, col_i] == board[row, col_j]:
-                yield col_i, col_j, row, row, board[row, col_i]
-
-            if board[col_i, row] == board[col_j, row]:
-                yield row, row, col_i, col_j, board[col_i, row]
-
-            if board[row, col_i] == board[row - 1, col_j]:
-                yield col_i, col_j, row, row - 1, board[row, col_i]
-
-            if board[row - 1, col_i] == board[row, col_j]:
-                yield col_i, col_j, row - 1, row, board[row, col_j]
-
-
-def compute_absolute_score(board: np.ndarray):
-    return sum(match[4] for match in matches_in_board(board))
-
-
-class Game:
-    size: int = 5
-
-    def __init__(self) -> None:
-        self.reset()
-
-    def reset(self) -> None:
-        self.numbers = np.random.randint(1, 10, self.size * self.size, np.uint8)
-        self.board = np.zeros((self.size, self.size), np.uint8)
-        self.step: int = 0
-
-    def print_board(self, filename: str = "") -> None:
-        fig, ax = plt.subplots(figsize=(3, 3))
-        assert isinstance(ax, Axes)
-        ax.set(
-            xlim=(-0.0, 4.5),
-            ylim=(4.5, -0.5),
-            xticks=np.arange(5) - 0.5,
-            yticks=np.arange(5) - 0.5,
-            xticklabels=(),
-            yticklabels=(),
-            aspect=1,
-        )
-
-        for i, j in np.ndindex(self.board.shape):
-            ax.text(
-                i,
-                j,
-                self.board[j, i] or "",
-                fontsize=20,
-                horizontalalignment="center",
-                verticalalignment="center",
-            )
-        ax.grid()
-
-        for match in matches_in_board(self.board):
-            col_i, col_j, row_i, row_j, value = match
-
-            if value == 0:
-                continue
-            col_pad = 0.15 * (col_j - col_i)
-            row_pad = 0.25 * (row_j - row_i)
-
-            ax.plot(
-                (col_i + col_pad, col_j - col_pad),
-                (row_i + row_pad, row_j - row_pad),
-                "r",
-            )
-
-        plt.tight_layout(pad=0)
-        plt.tick_params("both", size=0)
-        if filename:
-            fig.savefig(filename + f"_{self.step}.png")
-        else:
-            plt.show()
-        plt.close()
-
-    def board_absolute_score(self) -> int:
-        return compute_absolute_score(self.board)
-
-    def board_score(self) -> float:
-        return self.board_absolute_score() / self.max_score()
-
-    def max_score(self) -> int:
-        connections = (
-            0,
-            0,
-            1,
-            3,
-            6,
-            8,
-            11,
-            14,
-            17,
-            20,
-            23,
-            26,
-            29,
-            32,
-            35,
-            38,
-            41,
-            44,
-            47,
-        )
-
-        return sum(
-            val * connections[count]
-            for val, count in enumerate(np.bincount(self.numbers))
-        )
-
-    def empty_cells(self):
-        return np.asarray(np.where(self.board == 0)).T
-
-    @property
-    def next_number(self) -> int:
-        try:
-            return self.numbers[self.step]
-        except IndexError:
-            return 0
-
-    def pop_next_number(self) -> int:
-        next_number = self.next_number
-        if next_number != 0:
-            self.step += 1
-        return next_number
 
 
 class ScorePredictor(nn.Module):
@@ -167,6 +32,7 @@ class ScorePredictor(nn.Module):
     def forward(self, game: Tensor) -> Tensor:
         # score = torch.rand(1)
         # score = torch.tensor(game.board_absolute_score())
+        game = nn.functional.one_hot(game.long(), num_classes=10).float().flatten(1)
         score = self.layers(game)
         return score
 
@@ -201,7 +67,7 @@ class Agent:
     breaking_step: int = -1
     "Step at which choose a random move"
 
-    def __init__(self, game: Game, score_predictor: ScorePredictor):
+    def __init__(self, game: Game, score_predictor: nn.Module):
         self.loss_manager = LossManager()
         self.game = game
         self.score_predictor = score_predictor
@@ -223,21 +89,21 @@ class Agent:
         current_number: int,
         next_number: int,
     ) -> Tensor:
-        one_hot_encoded_board: Tensor = nn.functional.one_hot(
-            tensor(board, dtype=torch.int64), num_classes=10
+        # prepare a board for each possible move -> shape (N,5,5)
+        batch = board[None, ...].repeat(len(possible_moves), 0)
+
+        # populate boards with possible moves -> shape (N,5,5)
+        batch[range(len(possible_moves)), *possible_moves.T] = current_number
+
+        # add the next number information to each board -> shape (N,26)
+        batch = np.concatenate(
+            (batch.reshape(len(batch), -1), np.full((len(batch), 1), next_number)), 1
         )
 
-        batch = one_hot_encoded_board.float().repeat(len(possible_moves) or 1, 1, 1, 1)
-
-        for batch_element, (row, col) in zip(batch, possible_moves):
-            batch_element[row, col, current_number] = 1
-
-        next_number_batch = torch.zeros(len(batch), 10)
-        next_number_batch[:, next_number] = 1
-
-        return torch.cat((batch.flatten(1), next_number_batch), 1)
+        return torch.from_numpy(batch)
 
     def perform_step(self) -> bool:
+        """Return finished"""
         current_number = self.game.pop_next_number()
         next_number = self.game.next_number
         if current_number == 0:
@@ -253,7 +119,7 @@ class Agent:
         board_batch = self.generate_batch(
             self.game.board, possible_moves, current_number, next_number
         )
-        predicted_scores = self.score_predictor.forward(board_batch.to(DEVICE))
+        predicted_scores: Tensor = self.score_predictor.forward(board_batch.to(DEVICE))
 
         if self.game.step == self.breaking_step:
             choosen_index = randint(0, len(predicted_scores) - 1)
@@ -283,13 +149,9 @@ class Agent:
 
         return False
 
-    def play(self, n_games: int = 1, learn: bool = False, output_file: str = ""):
-        if output_file:
-            with open(output_file, "w") as f:
-                pass
+    def play(self, n_games: int = 1, learn: bool = False) -> None:
         scores = []
         all_losses = []
-        learn_every = 1
         batch_losses = []
         for game_number in trange(n_games):
             self.game.reset()
@@ -298,6 +160,7 @@ class Agent:
             # else:
             #     self.breaking_step = -1
             finished = False
+            self.predicted_scores.clear()
             while not finished:
                 finished = self.perform_step()
             assert np.count_nonzero(self.game.board) == 25
@@ -306,56 +169,40 @@ class Agent:
             # absolute_final_score = self.game.board_absolute_score()
             scores.append(final_score)
 
-            batch_losses = [
-                (score - final_score).abs() for score in self.predicted_scores
-            ]
-            self.loss_manager.add_losses(batch_losses)
+            batch_losses = (torch.stack(self.predicted_scores) - final_score).square()
+            # self.loss_manager.add_losses(batch_losses)
 
-            # batch_loss = sum(
-            # ((score - final_score).abs() for score in self.predicted_scores)
-            # if game_number < 2500
-            # else (
-            # (score - final_score).abs() for score in self.predicted_scores[10:]
-            # )
-            # )
-            # assert isinstance(batch_loss, Tensor)
-
-            self.predicted_scores.clear()
-
-            if learn and len(batch_losses) == learn_every:
+            if learn:
                 self.optimizer.zero_grad()
-                batch_loss = sum(batch_losses)
-                batch_losses.clear()
-                assert isinstance(batch_loss, Tensor)
-                batch_loss.backward()
+                batch_losses.sum().backward()
                 self.optimizer.step()
-            self.schedule.step()
 
-            if game_number % 100 == 0:
+            if game_number % 3000 == 0:
                 plot_results(scores, all_losses)
 
         plot_results(scores, all_losses)
 
 
-def plot_results(scores, losses):
-    fig, ax = plt.subplots(2, sharex=True, figsize=(6, 4))
+def plot_results(scores, losses) -> None:
+    fig = plt.figure(figsize=(6, 4))
+    ax0 = fig.add_subplot(2, 1, 1)
+    ax1 = fig.add_subplot(2, 1, 2)
 
-    ax[0].plot(scores, lw=1)
-    ax[1].plot(losses, lw=1)
-    ax[0].set(
+    ax0.plot(scores, lw=1)
+    ax1.plot(losses, lw=1)
+    ax0.set(
         ylim=(0, 1),
         ylabel="Score",
         title=f"{np.mean(scores[-500:]):.1%} mean 500 scores",
     )
-    ax[0].yaxis.set_major_formatter(mtick.PercentFormatter())
-    ax[0].axhline(0.272, color="gray", linestyle=":", label="Random")
-    ax[0].axhline(0.465, color="gray", linestyle=":", label="Maximize")
-    ax[1].set(ylim=(0, None), ylabel="Loss", xlabel="Games")
+    ax0.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax0.axhline(0.272, color="gray", linestyle=":", label="Random")
+    ax0.axhline(0.465, color="gray", linestyle=":", label="Maximize")
+    ax1.set(ylim=(0, None), ylabel="Loss", xlabel="Games")
 
     if len(scores) > 200:
-        N = 100
-        ax[0].plot(gaussian_filter1d(scores, 30, mode="nearest"))
-        ax[1].plot(gaussian_filter1d(losses, 30, mode="nearest"))
+        ax0.plot(gaussian_filter1d(scores, 30, mode="nearest"))
+        ax1.plot(gaussian_filter1d(losses, 30, mode="nearest"))
     plt.tight_layout(pad=0.2)
     fig.savefig("scores")
     plt.close()
@@ -365,7 +212,7 @@ game = Game()
 score_predictor = ScorePredictor().to(DEVICE)
 agent = Agent(game, score_predictor)
 
-agent.play(n_games=10000, learn=True, output_file="scores_train.dat")
+agent.play(n_games=10000, learn=True)
 # agent.play(n_games=1000, learn=False, output_file="scores_test.dat")
 
 torch.save(score_predictor.state_dict(), "model.pth")
