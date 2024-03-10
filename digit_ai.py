@@ -15,8 +15,9 @@ DEVICE = "cuda"
 
 
 class ScorePredictor(nn.Module):
-    def __init__(self, board_size: int = 5, n_numbers: int = 10):
+    def __init__(self, board_size: int = 5, n_numbers: int = 10) -> None:
         super().__init__()
+        self.n_numbers = n_numbers
 
         self.layers = nn.Sequential(
             nn.Linear(n_numbers * (board_size * board_size + 1), 256),
@@ -26,15 +27,15 @@ class ScorePredictor(nn.Module):
             nn.Linear(128, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
-            nn.Sigmoid(),
+            # nn.Sigmoid(),
         )
 
     def forward(self, game: Tensor) -> Tensor:
-        # score = torch.rand(1)
-        # score = torch.tensor(game.board_absolute_score())
-        game = nn.functional.one_hot(game.long(), num_classes=10).float().flatten(1)
-        score = self.layers(game)
-        return score
+        return self.layers(
+            nn.functional.one_hot(game.long(), num_classes=self.n_numbers)
+            .float()
+            .flatten(1)
+        )
 
 
 class LossManager:
@@ -67,15 +68,13 @@ class Agent:
     breaking_step: int = -1
     "Step at which choose a random move"
 
-    def __init__(self, game: Game, score_predictor: nn.Module):
+    def __init__(self, game: Game, score_predictor: nn.Module) -> None:
         self.loss_manager = LossManager()
         self.game = game
         self.score_predictor = score_predictor
         self.optimizer = optim.Adam(
             self.score_predictor.parameters(),
             lr=0.0002,
-            # weight_decay=1e-3,
-            # amsgrad=True,
         )
         self.schedule = optim.lr_scheduler.MultiStepLR(
             self.optimizer, [30000, 4000, 5000, 6000, 7000, 8000, 9000], 0.3
@@ -177,7 +176,7 @@ class Agent:
                 batch_losses.sum().backward()
                 self.optimizer.step()
 
-            if game_number % 3000 == 0:
+            if game_number % 300 == 0:
                 plot_results(scores, all_losses)
 
         plot_results(scores, all_losses)
