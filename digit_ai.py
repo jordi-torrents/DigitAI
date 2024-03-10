@@ -6,12 +6,14 @@ import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter1d
 from torch import Tensor, nn, optim
+from torch.backends import cudnn
 from torch.types import Number
 from tqdm import trange
 
 from digit_game import Game, compute_absolute_score
 
-DEVICE = "cuda"
+cudnn.benchmark = True
+DEVICE = torch.device("cuda")
 
 
 class ScorePredictor(nn.Module):
@@ -68,7 +70,7 @@ class Agent:
     breaking_step: int = -1
     "Step at which choose a random move"
 
-    def __init__(self, game: Game, score_predictor: nn.Module) -> None:
+    def __init__(self, game: Game, score_predictor: ScorePredictor) -> None:
         self.loss_manager = LossManager()
         self.game = game
         self.score_predictor = score_predictor
@@ -98,7 +100,11 @@ class Agent:
 
         # add the next number information to each board -> shape (N,26)
         batch = np.concatenate(
-            (batch.reshape(len(batch), -1), np.full((len(batch), 1), next_number)), 1
+            (
+                batch.reshape(len(batch), -1),
+                np.full((len(batch), 1), next_number, batch.dtype),
+            ),
+            1,
         )
 
         return torch.from_numpy(batch)
